@@ -1,0 +1,82 @@
+html {
+    background-color: #0e1014;
+}
+
+:root {
+    --bg: #0e1014;
+    --panel: rgba(23, 26, 33, 0.86);
+    --line: rgba(255, 255, 255, 0.08);
+    --text: #e8e6e3;
+    --muted: #9aa0aa;
+    --copper: #e08a5b;
+    --copper-strong: #f0a06c;
+    --teal: #69c7bd;
+    --danger: #e06c75;
+    --warning: #e0a458;
+    --ok: #6fd1a8;
+    color-scheme: dark;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+[hidden] {
+    display: none !important;
+}
+
+body {
+    margin: 0;
+    color: var(--text);
+    font-family: "Nunito", "Microsoft YaHei UI", "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    background:
+        radial-gradient(circle at 12% -10%, rgba(224, 138, 91, 0.14), transparent 42%),
+        radial-gradient(circle at 92% 8%, rgba(105, 199, 189, 0.08), transparent 38%),
+        var(--bg);
+    background-attachment: fixed;
+    overflow-x: hidden;
+}
+
+@font-face {
+    font-family: "Nunito";
+    font-style: normal;
+    font-weight: 400;
+    src: local(""),
+    url("assets/fonts/nunito-v16-latin-regular.woff2") format("woff2");
+}
+
+#app {
+    min-height: 100vh;
+}
+
+::selection {
+    background: rgba(224, 138, 91, 0.35);
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #2b3039;
+    border-radius: 10px;
+    border: 2px solid var(--bg);
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+button,
+input,
+select {
+    font-family: inherit;
+}
+
+button {
+    -webkit-tap-highlight-color: transparent;
+}
