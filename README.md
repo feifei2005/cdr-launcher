@@ -28,6 +28,8 @@ Windows 整合包启动器。Go 负责启动、更新与文件操作，Wails v2 
 
 令牌保存在 `%APPDATA%\CDRLauncher\accounts.dat`，使用 Windows DPAPI 按当前用户加密，换用户或换机器无法直接复制；皮肤站密码只用于换取令牌，不会落盘。
 
+> 合规提示：离线登录与皮肤站外置登录仅适用于离线模式或采用外置登录认证的服务器，**不等于拥有 Minecraft 授权**；玩家需自行持有正版。本项目为非官方工具，与 Mojang / Microsoft 无关联。
+
 ### 更换内置 Azure 应用（维护者）
 
 1. 打开 [Azure 门户](https://portal.azure.com) → Microsoft Entra ID → 应用注册 → 新注册
@@ -122,6 +124,17 @@ internal/logs      日志尾部读取、诊断包导出
 cmd/cdrpub         发布工具（manifest / diff / verify / serve）
 frontend/          Vite + TypeScript 界面与 Wails 生成的绑定
 ```
+
+## 合规与免责
+
+> Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.
+
+- 本项目是非官方第三方启动器，与 Mojang、Microsoft 无隶属关系；界面中的「Minecraft」仅为描述性使用。
+- 仓库与启动器本身不包含、也不分发 Minecraft 游戏本体、资源文件或库；玩家需自行持有正版 Minecraft 授权。自行制作分发包时请勿包含 `versions/*/` 下的客户端 jar、`libraries/`、`assets/`，应让玩家用官方启动器安装，或由启动器从 Mojang 官方 CDN 下载。
+- 离线登录与皮肤站外置登录仅用于 `online-mode=false` 或采用外置登录认证的服务器，不代表拥有游戏授权，请勿用于规避正版验证。
+- 整合包内的模组、光影、资源包版权归各自作者所有；再分发前需确认其许可证允许，禁止转载的项目应从分发包与更新源中移除。
+- `authlib-injector` 采用 AGPL-3.0 及 AUTHLIB-INJECTOR 例外条款；本启动器仅在运行时从官方发布页下载并校验 sha256，未转存其二进制。
+- 本仓库未附带开源许可证，默认保留所有权利（All rights reserved）。
 
 ## 说明
 
