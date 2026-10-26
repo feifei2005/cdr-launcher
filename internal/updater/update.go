@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"cdr-launcher/internal/manifest"
+	"cdr-launcher/internal/netproxy"
 )
 
 const (
@@ -46,6 +47,8 @@ type Options struct {
 	CurrentVersion string
 	PackID         string
 	Channel        string
+	Workers        int
+	Segments       int
 	Progress       func(Progress)
 }
 
@@ -74,7 +77,7 @@ type Result struct {
 
 // FetchManifest 下载并解析 manifest。
 func FetchManifest(ctx context.Context, rawURL string) (*manifest.Manifest, error) {
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := netproxy.NewClient(60 * time.Second)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("构造 manifest 请求失败: %w", err)
@@ -213,6 +216,7 @@ func Update(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	dl.SetConcurrency(opts.Workers, opts.Segments)
 	if err := dl.Fetch(ctx, required); err != nil {
 		return Result{}, err
 	}

@@ -28,7 +28,8 @@ var placeholderRe = regexp.MustCompile(`\$\{[^}]*\}`)
 
 // BuildLaunch 求值规则、解压 natives、替换占位符，生成完整启动参数。
 // instanceDir 用于定位 libraries/assets，gameDir 是游戏工作目录（版本隔离实例为 versions/<id>）。
-func BuildLaunch(v *Version, instanceDir, gameDir, javaPath string, player Player, memoryMB int) (*LaunchSpec, error) {
+// extraJVMArgs 追加在版本自带 JVM 参数之后、主类之前，用于皮肤站注入等场景。
+func BuildLaunch(v *Version, instanceDir, gameDir, javaPath string, player Player, memoryMB int, extraJVMArgs ...string) (*LaunchSpec, error) {
 	absDir, err := filepath.Abs(instanceDir)
 	if err != nil {
 		return nil, fmt.Errorf("解析实例目录失败: %w", err)
@@ -86,6 +87,11 @@ func BuildLaunch(v *Version, instanceDir, gameDir, javaPath string, player Playe
 		args = append(args, fmt.Sprintf("-Xmx%dM", memoryMB))
 	}
 	args = append(args, jvmArgs...)
+	for _, extra := range extraJVMArgs {
+		if strings.TrimSpace(extra) != "" {
+			args = append(args, extra)
+		}
+	}
 	args = append(args, v.MainClass)
 	args = append(args, gameArgs...)
 

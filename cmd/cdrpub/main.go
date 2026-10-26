@@ -39,6 +39,8 @@ func main() {
 		err = runVerify(os.Args[2:])
 	case "serve":
 		err = runServe(os.Args[2:])
+	case "upload":
+		err = runUpload(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -57,13 +59,16 @@ func usage() {
   diff      生成 zstd 差分补丁
   verify    校验清单与 blob 完整性
   serve     启动本地 HTTP 测试源
+  upload    把发布目录上传到 Cloudflare R2（并发、重试、可跳过已存在）
 
 示例:
   cdrpub manifest --root "versions/Create-Delight-Remake" --version 5.3.0 \
-      --base-url https://dl.example.com/pack/ --out dist/stable
+      --base-url https://mc-api.example.cn/pack/ --out dist/stable
   cdrpub diff --from-root old --to-root new --from 5.2.0 --to 5.3.0 \
       --out dist/stable --manifest dist/stable/manifest.json
   cdrpub verify --dir dist/stable
+  cdrpub upload --dir dist/stable --bucket cdr-pack --prefix pack/ \
+      --public-base https://mc-api.example.cn/pack --skip-existing
   cdrpub serve --dir dist --addr 127.0.0.1:8080`)
 }
 

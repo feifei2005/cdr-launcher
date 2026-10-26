@@ -14,7 +14,11 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"cdr-launcher/internal/fetch"
+	"cdr-launcher/internal/netproxy"
 )
 
 // 固定 Temurin JRE 版本，不跟随 latest；升级由启动器版本显式携带。
@@ -39,8 +43,8 @@ func InstalledJavaPath(instanceDir string) string {
 }
 
 // EnsureJava 确保实例目录下存在固定版本的 Temurin JRE，缺失时下载并校验安装。
-// progress 以 (已下载字节, 总字节) 形式上报，可为 nil。
-func EnsureJava(ctx context.Context, instanceDir string, progress func(done, total int64)) (string, error) {
+// segments 是单个文件的并发分片连接数；progress 以 (已下载字节, 总字节) 形式上报，可为 nil。
+func EnsureJava(ctx context.Context, instanceDir string, segments int, progress func(done, total int64)) (string, error) {
 	target := InstalledJavaPath(instanceDir)
 	if fileExists(target) {
 		return target, nil
@@ -55,7 +59,7 @@ func EnsureJava(ctx context.Context, instanceDir string, progress func(done, tot
 	archive := filepath.Join(downloads, temurinArchive)
 	if sum, err := fileSHA256(archive); err != nil || sum != TemurinSHA256 {
 		os.Remove(archive)
-		if err := fetchTemurinArchive(ctx, archive, progress); err != nil {
+		if err := fetchTemurinArchive(ctx, archive, segments, progress); err != nil {
 			return "", fmt.Errorf("下载 Java 失败: %w", err)
 		}
 	}
@@ -92,10 +96,10 @@ func EnsureJava(ctx context.Context, instanceDir string, progress func(done, tot
 }
 
 // fetchTemurinArchive 依次尝试各下载源，以 SHA256 判定成功，失败则换源重试。
-func fetchTemurinArchive(ctx context.Context, archive string, progress func(done, total int64)) error {
+func fetchTemurinArchive(ctx context.Context, archive string, segments int, progress func(done, total int64)) error {
 	var lastErr error
 	for _, url := range TemurinURLs {
-		if err := downloadFile(ctx, url, archive, temurinSize, progress); err != nil {
+		if err := downloadFile(ctx, url, archive, temurinSize, segments, progress); err != nil {
 			lastErr = err
 			continue
 		}
@@ -112,8 +116,8 @@ func fetchTemurinArchive(ctx context.Context, archive string, progress func(done
 	return lastErr
 }
 
-// downloadFile 支持 HTTP Range 断点续传，成功后把 .part 改名为目标文件。
-func downloadFile(ctx context.Context, url, dest string, expected int64, progress func(done, total int64)) error {
+// downloadFile 支持 HTTP Range 断点续传与多连接分片，成功后把 .part 改名为目标文件。
+func downloadFile(ctx context.Context, url, dest string, expected int64, segments int, progress func(done, total int64)) error {
 	part := dest + ".part"
 	var offset int64
 	if st, err := os.Stat(part); err == nil {
@@ -124,20 +128,11 @@ func downloadFile(ctx context.Context, url, dest string, expected int64, progres
 		offset = 0
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", "cdr-launcher")
-	if offset > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
-	}
-
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
 		TLSHandshakeTimeout:   20 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
+		ForceAttemptHTTP2:     true,
 	}
 	// 优先 IPv4：部分网络到 GitHub 的 IPv6 路由不可用，直接 v6 会长时间挂起。
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -149,7 +144,30 @@ func downloadFile(ctx context.Context, url, dest string, expected int64, progres
 		}
 		return dialer.DialContext(ctx, network, addr)
 	}
+	netproxy.Apply(transport)
 	client := &http.Client{Transport: transport}
+
+	// 大文件优先多连接分片；服务端不支持 Range 时回退单连接续传。
+	if offset == 0 && expected >= fetch.MinSegmentSize && segments > 1 {
+		err := downloadSegmented(ctx, client, url, part, expected, segments, progress)
+		if err == nil {
+			return os.Rename(part, dest)
+		}
+		_ = os.Remove(part)
+		if !errors.Is(err, fetch.ErrRangeUnsupported) {
+			return err
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "cdr-launcher")
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -162,7 +180,7 @@ func downloadFile(ctx context.Context, url, dest string, expected int64, progres
 	case http.StatusPartialContent:
 	case http.StatusRequestedRangeNotSatisfiable:
 		os.Remove(part)
-		return downloadFile(ctx, url, dest, expected, progress)
+		return downloadFile(ctx, url, dest, expected, segments, progress)
 	default:
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
@@ -204,6 +222,41 @@ func downloadFile(ctx context.Context, url, dest string, expected int64, progres
 		return fmt.Errorf("下载不完整: %d/%d 字节", writer.done, total)
 	}
 	return os.Rename(part, dest)
+}
+
+// downloadSegmented 用多条 Range 连接并发下载归档到 .part。
+func downloadSegmented(ctx context.Context, client *http.Client, url, part string, size int64, connections int, progress func(done, total int64)) error {
+	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if err := f.Truncate(size); err != nil {
+		f.Close()
+		_ = os.Remove(part)
+		return err
+	}
+	var reported atomic.Int64
+	err = fetch.Segmented(ctx, client, url, f, size, connections, func(n int64) {
+		done := reported.Add(n)
+		if progress != nil {
+			progress(done, size)
+		}
+	})
+	if err != nil {
+		f.Close()
+		_ = os.Remove(part)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(part)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(part)
+		return err
+	}
+	return nil
 }
 
 type progressWriter struct {

@@ -2,6 +2,7 @@ package updater
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,20 +14,51 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"cdr-launcher/internal/fetch"
+	"cdr-launcher/internal/netproxy"
 )
 
 const (
-	defaultWorkers = 8
-	maxAttempts    = 3
+	defaultWorkers  = 512
+	defaultSegments = 32
+	maxWorkers      = 1024
+	maxSegments     = 64
+	maxAttempts     = 3
 )
 
-// Downloader 负责把 blob 下载到 staging 目录，支持 Range 续传。
+// Downloader 负责把 blob 下载到 staging 目录，支持 Range 续传与多连接分片。
 type Downloader struct {
 	Client   *http.Client
 	BaseURL  string
 	Dir      string
 	Workers  int
-	Progress func(done, total int64)
+	Segments int
+	// ChunkSize 是启用分片的最小文件大小，测试中可调小。
+	ChunkSize int64
+	Progress  func(done, total int64)
+}
+
+// SetConcurrency 设置并发下载的文件数与单文件分片连接数。
+func (d *Downloader) SetConcurrency(workers, segments int) {
+	if workers < 1 {
+		workers = defaultWorkers
+	}
+	if workers > maxWorkers {
+		workers = maxWorkers
+	}
+	if segments <= 0 {
+		segments = defaultSegments
+	}
+	if segments > maxSegments {
+		segments = maxSegments
+	}
+	d.Workers = workers
+	d.Segments = segments
+	if transport, ok := d.Client.Transport.(*http.Transport); ok {
+		transport.MaxIdleConns = workers * 2
+		transport.MaxIdleConnsPerHost = workers
+	}
 }
 
 // ManifestURL 把更新源转换为 manifest 地址。
@@ -104,22 +136,27 @@ func NewDownloader(base, dir string, progress func(done, total int64)) (*Downloa
 	if dir == "" {
 		return nil, fmt.Errorf("下载目录不能为空")
 	}
+	transport := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          defaultWorkers * 2,
+		MaxIdleConnsPerHost:   defaultWorkers,
+		ForceAttemptHTTP2:     true,
+	}
+	netproxy.Apply(transport)
 	return &Downloader{
 		Client: &http.Client{
-			Timeout: 0,
-			Transport: &http.Transport{
-				Proxy:                 http.ProxyFromEnvironment,
-				DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-				TLSHandshakeTimeout:   15 * time.Second,
-				ResponseHeaderTimeout: 30 * time.Second,
-				IdleConnTimeout:       60 * time.Second,
-				MaxIdleConnsPerHost:   defaultWorkers,
-			},
+			Timeout:   0,
+			Transport: transport,
 		},
-		BaseURL:  base,
-		Dir:      dir,
-		Workers:  defaultWorkers,
-		Progress: progress,
+		BaseURL:   base,
+		Dir:       dir,
+		Workers:   defaultWorkers,
+		Segments:  defaultSegments,
+		ChunkSize: fetch.MinSegmentSize,
+		Progress:  progress,
 	}, nil
 }
 
@@ -260,6 +297,62 @@ func (d *Downloader) fetchOne(ctx context.Context, b Blob, tracker *progressTrac
 	return fmt.Errorf("下载 %s 失败: %w", b.Sha256, lastErr)
 }
 
+func (d *Downloader) chunkThreshold() int64 {
+	if d.ChunkSize > 0 {
+		return d.ChunkSize
+	}
+	return fetch.MinSegmentSize
+}
+
+// fetchChunked 用多条连接分片下载单个大 blob。
+func (d *Downloader) fetchChunked(ctx context.Context, link string, b Blob, final, part string, tracker *progressTracker) error {
+	if err := os.Remove(part); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if err := f.Truncate(b.Size); err != nil {
+		f.Close()
+		_ = os.Remove(part)
+		return err
+	}
+
+	var attempt atomic.Int64
+	err = fetch.Segmented(ctx, d.Client, link, f, b.Size, d.Segments, func(n int64) {
+		attempt.Add(n)
+		if tracker != nil {
+			tracker.add(n)
+		}
+	})
+	if err != nil {
+		f.Close()
+		_ = os.Remove(part)
+		if tracker != nil {
+			tracker.add(-attempt.Load())
+		}
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(part)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(part)
+		return err
+	}
+	if err := verifyFile(part, b.Size, b.Sha256); err != nil {
+		_ = os.Remove(part)
+		return err
+	}
+	if err := os.Remove(final); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(part, final)
+}
+
 func (d *Downloader) fetchAttempt(ctx context.Context, link string, b Blob, final, part string, tracker *progressTracker) error {
 	if verifyFile(final, b.Size, b.Sha256) == nil {
 		return nil
@@ -285,6 +378,18 @@ func (d *Downloader) fetchAttempt(ctx context.Context, link string, b Blob, fina
 	offset := int64(0)
 	if fi, err := os.Stat(part); err == nil {
 		offset = fi.Size()
+	}
+
+	// 大文件且服务器支持时走多连接分片；不支持则回退到单连接续传。
+	if offset == 0 && d.Segments > 1 && b.Size >= d.chunkThreshold() {
+		err := d.fetchChunked(ctx, link, b, final, part, tracker)
+		if err == nil {
+			return nil
+		}
+		_ = os.Remove(part)
+		if !errors.Is(err, fetch.ErrRangeUnsupported) {
+			return err
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)

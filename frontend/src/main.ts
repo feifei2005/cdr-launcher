@@ -2,25 +2,32 @@ import './style.css';
 import './app.css';
 
 import {
+    CancelMicrosoftLogin,
     CancelUpdate,
+    CheckLauncherUpdate,
     CheckUpdate,
     DownloadJava,
     ExportDiagnostics,
     GetState,
+    InstallLauncherUpdate,
     InstallUpdate,
     KillGame,
     ListBackups,
     ListMods,
+    LoginYggdrasil,
     OpenFolder,
     PickDirectory,
+    RemoveAccount,
     RescanJava,
     Rollback,
     SaveSettings,
     SetModEnabled,
     StartGame,
+    StartMicrosoftLogin,
+    SwitchAccount,
     TailLog
 } from '../wailsjs/go/main/App';
-import {EventsOn} from '../wailsjs/runtime/runtime';
+import {BrowserOpenURL, ClipboardSetText, EventsOn} from '../wailsjs/runtime/runtime';
 
 interface SettingsView {
     instanceDir: string;
@@ -28,7 +35,25 @@ interface SettingsView {
     playerName: string;
     memoryMb: number;
     channel: string;
-    updateUrl: string;
+    yggdrasilServer: string;
+    downloadWorkers: number;
+    downloadSegments: number;
+}
+
+interface AccountView {
+    id: string;
+    kind: 'microsoft' | 'yggdrasil' | string;
+    name: string;
+    uuid: string;
+    serverUrl?: string;
+    expiresAt?: string;
+}
+
+interface DeviceCodeView {
+    userCode: string;
+    verificationUri: string;
+    message: string;
+    expiresIn: number;
 }
 
 interface JavaView {
@@ -56,6 +81,12 @@ interface StateView {
     javaScanning: boolean;
     javaError?: string;
     instance: InstanceView;
+    accounts: AccountView[];
+    accountId: string;
+    microsoftLoggingIn: boolean;
+    proxy: string;
+    launcherVersion: string;
+    launcherUpdating: boolean;
     running: boolean;
     updating: boolean;
     rollingBack: boolean;
@@ -154,8 +185,20 @@ document.querySelector('#app')!.innerHTML = `
   <main class="layout">
     <section class="panel launch-panel">
       <div class="field">
-        <label for="player-name">游戏昵称</label>
-        <input id="player-name" class="text-input" maxlength="16" autocomplete="off" spellcheck="false" placeholder="3-16 位字母、数字或下划线"/>
+        <div class="field-head">
+          <label>登录账号</label>
+          <button id="open-account" class="link-btn" type="button">管理账号</button>
+        </div>
+        <div class="account-card" id="account-card">
+          <div class="account-avatar" id="account-avatar">P</div>
+          <div class="account-main">
+            <strong id="account-name">Player</strong>
+            <small id="account-kind">离线登录</small>
+          </div>
+          <span class="account-tag" id="account-tag">离线</span>
+        </div>
+        <input id="player-name" class="text-input offline-name" maxlength="16" autocomplete="off" spellcheck="false" placeholder="离线昵称：3-16 位字母、数字或下划线"/>
+        <small class="hint" id="account-hint">离线登录只在本机生效，服务器需为离线模式</small>
       </div>
 
       <div class="field">
@@ -226,7 +269,7 @@ document.querySelector('#app')!.innerHTML = `
   </main>
 
   <footer class="footer">
-    <span>离线昵称登录 · 首次启动会自动补齐缺失的库文件</span>
+    <span id="footer-account">离线登录 · 首次启动会自动补齐缺失的库文件</span>
     <span id="footer-state">就绪</span>
   </footer>
 </div>
@@ -252,13 +295,29 @@ document.querySelector('#app')!.innerHTML = `
       <small class="hint">自动模式优先使用 Java 21，缺失时下载内置版本</small>
     </div>
     <div class="field">
-      <label for="update-url">更新地址</label>
-      <input id="update-url" class="text-input mono" spellcheck="false" placeholder="https://update.example.com/stable/"/>
-      <small class="hint">整合包更新源，留空则不检查更新</small>
+      <label>下载并发</label>
+      <div class="input-row">
+        <input id="download-workers" class="text-input" type="number" min="1" max="1024" step="1" inputmode="numeric"/>
+        <input id="download-segments" class="text-input" type="number" min="1" max="64" step="1" inputmode="numeric"/>
+      </div>
+      <small class="hint">可手动填写：文件并发 1–1024，大文件分片 1–64（≥8 MB 才分片）</small>
+    </div>
+    <div class="field">
+      <label>启动器版本</label>
+      <div class="input-row">
+        <div class="readonly mono" id="launcher-version">v--</div>
+        <button id="check-launcher" class="ghost-btn" type="button">检查更新</button>
+      </div>
+      <small class="hint" id="launcher-update-hint">更新源已内置，更新后会自动重启</small>
     </div>
     <div class="field">
       <label>版本通道</label>
       <div class="readonly" id="channel-value">stable</div>
+    </div>
+    <div class="field">
+      <label>网络代理</label>
+      <div class="readonly" id="proxy-value">检测中…</div>
+      <small class="hint">自动跟随 Windows 系统代理，用于登录、更新、Java 下载与游戏进程</small>
     </div>
   </div>
   <footer class="drawer-footer">
@@ -337,11 +396,77 @@ document.querySelector('#app')!.innerHTML = `
     <div id="history-list" class="history-list"></div>
   </div>
 </section>
+
+<section class="sheet narrow" id="account-sheet" hidden aria-label="登录账号">
+  <header class="sheet-head">
+    <div>
+      <h2>登录账号</h2>
+      <p class="sheet-sub">令牌用 Windows DPAPI 加密保存，皮肤站密码不会被存储</p>
+    </div>
+    <button class="icon-btn" type="button" data-close-sheet aria-label="关闭">×</button>
+  </header>
+  <div class="sheet-toolbar">
+    <div class="segmented" id="account-tabs">
+      <button class="active" type="button" data-tab="offline">离线</button>
+      <button type="button" data-tab="microsoft">Microsoft</button>
+      <button type="button" data-tab="yggdrasil">皮肤站</button>
+    </div>
+  </div>
+  <p id="account-message" class="sheet-status" hidden></p>
+  <div class="sheet-body">
+    <div class="account-tab" data-panel="offline">
+      <div class="field">
+        <label for="offline-name">离线昵称</label>
+        <input id="offline-name" class="text-input" maxlength="16" autocomplete="off" spellcheck="false" placeholder="3-16 位字母、数字或下划线"/>
+        <small class="hint">UUID 由昵称按原版离线规则推导，服务器需为 online-mode=false</small>
+      </div>
+      <button id="use-offline" class="ghost-btn wide" type="button">使用离线登录</button>
+    </div>
+
+    <div class="account-tab" data-panel="microsoft" hidden>
+      <p class="hint">使用内置应用登录，无需填写 Client ID。</p>
+      <div id="device-box" class="device-box" hidden>
+        <p class="device-tip">在浏览器打开登录页，输入下面的代码：</p>
+        <div class="device-code" id="device-code">----</div>
+        <button id="device-copy" class="ghost-btn wide" type="button">复制代码并打开登录页</button>
+      </div>
+      <button id="start-ms-login" class="launch-btn compact wide" type="button">使用 Microsoft 登录</button>
+      <button id="cancel-ms-login" class="ghost-btn wide" type="button" hidden>取消登录</button>
+    </div>
+
+    <div class="account-tab" data-panel="yggdrasil" hidden>
+      <div class="field">
+        <label for="ygg-server">皮肤站 API 地址</label>
+        <input id="ygg-server" class="text-input mono" spellcheck="false" placeholder="https://littleskin.cn/api/yggdrasil"/>
+        <small class="hint">只填域名也可以，会自动补 /api/yggdrasil</small>
+      </div>
+      <div class="field">
+        <label for="ygg-user">账号</label>
+        <input id="ygg-user" class="text-input" autocomplete="username" spellcheck="false"/>
+      </div>
+      <div class="field">
+        <label for="ygg-pass">密码</label>
+        <input id="ygg-pass" class="text-input" type="password" autocomplete="current-password"/>
+        <small class="hint">仅用于换取令牌；启动时自动注入 authlib-injector，皮肤与验证走该皮肤站</small>
+      </div>
+      <button id="ygg-login" class="launch-btn compact wide" type="button">登录皮肤站</button>
+    </div>
+
+    <div class="account-list-wrap">
+      <p class="account-list-title">已保存账号</p>
+      <div id="account-list" class="account-list"></div>
+    </div>
+  </div>
+</section>
 `;
 
 let state: StateView | null = null;
 let selectedMemory = 4096;
 let syncedMemory = -1;
+let selectedWorkers = 512;
+let selectedSegments = 32;
+let syncedWorkers = -1;
+let syncedSegments = -1;
 let busy = false;
 let lastMessage = '';
 let messageKind: 'error' | 'warn' | 'ok' = 'error';
@@ -360,6 +485,16 @@ let history: BackupView[] = [];
 let historyLoading = false;
 let confirmRollback = '';
 let rollbackTimer: number | undefined;
+let msDevice: DeviceCodeView | null = null;
+let msPending = false;
+let lastAuthError = '';
+let accountTab: 'offline' | 'microsoft' | 'yggdrasil' = 'offline';
+let confirmRemove = '';
+let removeTimer: number | undefined;
+let launcherInfo: { available: boolean; currentVersion: string; latestVersion: string; notes?: string; size: number } | null = null;
+let checkingLauncher = false;
+let installingLauncher = false;
+let launcherHint = '';
 
 const playerInput = $<HTMLInputElement>('#player-name');
 const launchButton = $<HTMLButtonElement>('#launch');
@@ -514,7 +649,6 @@ function renderUpdate() {
     const progress = $('#update-progress');
     const running = installingUpdate || !!state?.updating;
     const rolling = rollingBack || !!state?.rollingBack;
-    const configured = !!state?.settings.updateUrl;
 
     checkBtn.disabled = running || checkingUpdate || rolling;
     checkBtn.textContent = checkingUpdate ? '检查中…' : '检查更新';
@@ -538,10 +672,6 @@ function renderUpdate() {
         return;
     }
     progress.hidden = true;
-    if (!configured) {
-        status.textContent = '未配置更新地址';
-        return;
-    }
     if (!updateInfo) {
         status.textContent = '尚未检查';
         return;
@@ -563,6 +693,81 @@ function renderUpdate() {
     status.textContent = '尚未检查';
 }
 
+function renderLauncherUpdate() {
+    if (!state) return;
+    $('#launcher-version').textContent = `v${state.launcherVersion || '--'}`;
+    const button = $<HTMLButtonElement>('#check-launcher');
+    const busyLauncher = checkingLauncher || installingLauncher || !!state.launcherUpdating;
+    button.disabled = busyLauncher;
+    if (installingLauncher || state.launcherUpdating) {
+        button.textContent = '更新中…';
+    } else if (checkingLauncher) {
+        button.textContent = '检查中…';
+    } else if (launcherInfo?.available) {
+        button.textContent = `更新到 v${launcherInfo.latestVersion}`;
+    } else {
+        button.textContent = '检查更新';
+    }
+    const hint = $('#launcher-update-hint');
+    if (launcherHint) {
+        hint.textContent = launcherHint;
+    } else if (launcherInfo?.available) {
+        hint.textContent = `新版本 v${launcherInfo.latestVersion} · ${formatBytes(launcherInfo.size)}，更新后自动重启`;
+    } else {
+        hint.textContent = '更新源已内置，更新后会自动重启';
+    }
+}
+
+async function checkLauncherUpdate(silent = false) {
+    if (!state || checkingLauncher || installingLauncher || state.launcherUpdating) return;
+    checkingLauncher = true;
+    if (!silent) {
+        launcherHint = '正在检查启动器更新…';
+        renderLauncherUpdate();
+    }
+    try {
+        const info = await CheckLauncherUpdate();
+        launcherInfo = info;
+        if (!silent) {
+            launcherHint = info.available
+                ? `发现新版本 v${info.latestVersion}`
+                : `已是最新版本 v${info.currentVersion || state.launcherVersion}`;
+        } else if (info.available) {
+            launcherHint = `发现新版本 v${info.latestVersion}，可在设置中更新`;
+        }
+    } catch (err) {
+        launcherInfo = null;
+        if (!silent) launcherHint = normalizeError(err);
+    } finally {
+        checkingLauncher = false;
+        renderLauncherUpdate();
+    }
+}
+
+async function installLauncherUpdate() {
+    if (!state || installingLauncher || state.launcherUpdating) return;
+    installingLauncher = true;
+    launcherHint = '正在下载新版本…';
+    renderLauncherUpdate();
+    $('#footer-state').textContent = '更新启动器…';
+    try {
+        await InstallLauncherUpdate();
+    } catch (err) {
+        installingLauncher = false;
+        launcherHint = normalizeError(err);
+        renderLauncherUpdate();
+    }
+}
+
+async function launcherUpdateClick() {
+    if (!state || checkingLauncher || installingLauncher || state.launcherUpdating) return;
+    if (launcherInfo?.available) {
+        await installLauncherUpdate();
+        return;
+    }
+    await checkLauncherUpdate();
+}
+
 function render() {
     if (!state) return;
     if (document.activeElement !== playerInput) {
@@ -572,10 +777,20 @@ function render() {
         syncedMemory = state.settings.memoryMb;
         selectedMemory = state.settings.memoryMb;
     }
+    if (state.settings.downloadWorkers !== syncedWorkers) {
+        syncedWorkers = state.settings.downloadWorkers;
+        selectedWorkers = state.settings.downloadWorkers;
+    }
+    if (state.settings.downloadSegments !== syncedSegments) {
+        syncedSegments = state.settings.downloadSegments;
+        selectedSegments = state.settings.downloadSegments;
+    }
     renderHero();
     renderJava();
+    renderAccount();
     renderMemory();
     renderUpdate();
+    renderLauncherUpdate();
     renderLaunch();
     renderKill();
     const rolling = rollingBack || !!state.rollingBack;
@@ -596,13 +811,59 @@ async function refresh() {
     }
 }
 
-function collectSettings(instanceDir: string, javaPath: string, updateUrl: string) {
+let autoBootstrapDone = false;
+async function autoBootstrap() {
+    if (autoBootstrapDone || !state) return;
+    autoBootstrapDone = true;
+    if (state.running || state.updating || installingUpdate || checkingUpdate) return;
+    // 空实例（缺少版本 json 且无已安装索引）时自动下载完整包。
+    if (!state.instance.error || state.instance.packVersion) return;
+    await checkUpdate();
+    if (updateInfo?.available) await installUpdate();
+}
+
+function currentAccount(): AccountView | undefined {
+    if (!state?.accountId) return undefined;
+    return state.accounts.find(acc => acc.id === state!.accountId);
+}
+
+function accountLabel(acc: AccountView): string {
+    return acc.kind === 'microsoft' ? 'Microsoft' : '皮肤站';
+}
+
+function renderAccount() {
+    if (!state) return;
+    const acc = currentAccount();
+    const offline = !acc;
+    const name = offline ? (state.settings.playerName || 'Player') : acc!.name;
+    $('#account-avatar').textContent = (name.slice(0, 1) || 'P').toUpperCase();
+    $('#account-name').textContent = name;
+    $('#account-kind').textContent = offline
+        ? '离线登录 · 仅本机'
+        : (acc!.kind === 'microsoft' ? 'Microsoft 账号' : `皮肤站 · ${acc!.serverUrl || ''}`);
+    $('#account-tag').textContent = offline ? '离线' : (acc!.kind === 'microsoft' ? '正版' : '皮肤站');
+    playerInput.hidden = !offline;
+    const hint = $('#account-hint');
+    if (offline) {
+        hint.textContent = '离线登录只在本机生效，服务器需为离线模式';
+    } else if (acc!.kind === 'yggdrasil') {
+        hint.textContent = '启动时自动注入 authlib-injector，皮肤与在线验证走该皮肤站';
+    } else {
+        hint.textContent = '使用 Microsoft 正版登录，令牌在启动前自动刷新';
+    }
+    $('#footer-account').textContent = offline
+        ? `离线登录 · ${state.settings.playerName}`
+        : `${accountLabel(acc!)} · ${acc!.name}`;
+}
+
+function collectSettings(instanceDir: string, javaPath: string, playerName?: string) {
     return {
         instanceDir,
         javaPath,
-        playerName: playerInput.value.trim(),
+        playerName: playerName ?? playerInput.value.trim(),
         memoryMb: selectedMemory,
-        updateUrl,
+        downloadWorkers: selectedWorkers,
+        downloadSegments: selectedSegments,
     };
 }
 
@@ -616,7 +877,7 @@ async function launch() {
     $('#java-progress-text').textContent = '准备中';
     $('#footer-state').textContent = '启动中';
     try {
-        await SaveSettings(collectSettings(state.settings.instanceDir, state.settings.javaPath, state.settings.updateUrl));
+        await SaveSettings(collectSettings(state.settings.instanceDir, state.settings.javaPath));
         await StartGame();
         showMessage('游戏已启动，日志写入 logs/ 目录', 'ok');
     } catch (err) {
@@ -672,10 +933,6 @@ function phaseLabel(phase: string): string {
 
 async function checkUpdate() {
     if (!state || checkingUpdate || installingUpdate || state.updating) return;
-    if (!state.settings.updateUrl) {
-        showMessage('未配置更新地址，请在启动器设置中填写', 'warn');
-        return;
-    }
     checkingUpdate = true;
     updateInfo = null;
     updateMessage = '正在检查更新…';
@@ -756,8 +1013,11 @@ function openDrawer() {
         select.appendChild(custom);
     }
     select.value = current.settings.javaPath;
-    $<HTMLInputElement>('#update-url').value = current.settings.updateUrl;
+    $<HTMLInputElement>('#download-workers').value = String(current.settings.downloadWorkers);
+    $<HTMLInputElement>('#download-segments').value = String(current.settings.downloadSegments);
     $('#channel-value').textContent = current.settings.channel;
+    $('#proxy-value').textContent = current.proxy || '直连';
+    renderLauncherUpdate();
     $('#drawer').hidden = false;
     $('#drawer-mask').hidden = false;
 }
@@ -769,11 +1029,22 @@ function closeDrawer() {
 
 async function saveDrawer() {
     if (!state) return;
+    const workersInput = $<HTMLInputElement>('#download-workers');
+    const segmentsInput = $<HTMLInputElement>('#download-segments');
+    const workersRaw = workersInput.value.trim();
+    const segmentsRaw = segmentsInput.value.trim();
+    if (workersRaw && Number.isFinite(Number(workersRaw))) {
+        selectedWorkers = Math.min(1024, Math.max(1, Math.round(Number(workersRaw))));
+    }
+    if (segmentsRaw && Number.isFinite(Number(segmentsRaw))) {
+        selectedSegments = Math.min(64, Math.max(1, Math.round(Number(segmentsRaw))));
+    }
+    workersInput.value = String(selectedWorkers);
+    segmentsInput.value = String(selectedSegments);
     try {
         await SaveSettings(collectSettings(
             $<HTMLInputElement>('#instance-dir').value.trim(),
             $<HTMLSelectElement>('#java-select').value,
-            $<HTMLInputElement>('#update-url').value.trim(),
         ));
         closeDrawer();
         showMessage('设置已保存', 'ok');
@@ -793,6 +1064,204 @@ async function pickInstance() {
     }
 }
 
+// ---------- 账号面板 ----------
+
+function setAccountMessage(text: string, kind: 'error' | 'ok' = 'error') {
+    const el = $<HTMLParagraphElement>('#account-message');
+    el.textContent = text;
+    el.hidden = !text;
+    el.classList.toggle('ok', kind === 'ok');
+}
+
+function selectAccountTab(tab: typeof accountTab) {
+    accountTab = tab;
+    document.querySelectorAll<HTMLButtonElement>('#account-tabs button').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tab);
+    });
+    document.querySelectorAll<HTMLElement>('.account-tab').forEach(panel => {
+        panel.hidden = panel.dataset.panel !== tab;
+    });
+}
+
+function initAccountSheet() {
+    if (!state) return;
+    setAccountMessage(lastAuthError);
+    $<HTMLInputElement>('#offline-name').value = state.settings.playerName;
+    $<HTMLInputElement>('#ygg-server').value = state.settings.yggdrasilServer || 'https://littleskin.cn/api/yggdrasil';
+    msPending = state.microsoftLoggingIn;
+    const active = currentAccount();
+    selectAccountTab(active ? (active.kind === 'yggdrasil' ? 'yggdrasil' : 'microsoft') : 'offline');
+    if (msPending && !msDevice) {
+        setAccountMessage('正在等待 Microsoft 授权完成…');
+    }
+    renderDevice();
+    renderAccountList();
+}
+
+function renderDevice() {
+    const running = msPending || !!state?.microsoftLoggingIn;
+    $('#device-box').hidden = !running || !msDevice;
+    $<HTMLButtonElement>('#start-ms-login').hidden = running;
+    $<HTMLButtonElement>('#cancel-ms-login').hidden = !running;
+    if (msDevice) {
+        $('#device-code').textContent = msDevice.userCode;
+    }
+}
+
+function renderAccountList() {
+    if (!state) return;
+    const box = $('#account-list');
+    if (!state.accounts.length) {
+        box.innerHTML = '<p class="sheet-empty">还没有保存的账号</p>';
+        return;
+    }
+    box.innerHTML = state.accounts.map(acc => {
+        const active = acc.id === state!.accountId;
+        const subtitle = acc.kind === 'microsoft'
+            ? 'Microsoft 正版账号'
+            : `皮肤站 · ${acc.serverUrl || ''}`;
+        const armed = confirmRemove === acc.id;
+        return `
+        <div class="account-row${active ? ' active' : ''}">
+          <div class="account-row-main">
+            <strong>${escapeHtml(acc.name)}${active ? '<span class="account-current">使用中</span>' : ''}</strong>
+            <small>${escapeHtml(subtitle)}</small>
+          </div>
+          <div class="account-row-actions">
+            <button class="ghost-btn small" type="button" data-use="${escapeHtml(acc.id)}" ${active ? 'disabled' : ''}>使用</button>
+            <button class="ghost-btn small danger${armed ? ' armed' : ''}" type="button" data-remove="${escapeHtml(acc.id)}">${armed ? '确认' : '删除'}</button>
+          </div>
+        </div>`;
+    }).join('');
+}
+
+async function useOffline() {
+    if (!state) return;
+    const name = $<HTMLInputElement>('#offline-name').value.trim();
+    if (!/^[A-Za-z0-9_]{3,16}$/.test(name)) {
+        setAccountMessage('离线昵称需为 3-16 位字母、数字或下划线');
+        return;
+    }
+    try {
+        await SaveSettings(collectSettings(state.settings.instanceDir, state.settings.javaPath, name));
+        await SwitchAccount('');
+        playerInput.value = name;
+        setAccountMessage('已切换到离线登录', 'ok');
+        await refresh();
+        renderAccountList();
+    } catch (err) {
+        setAccountMessage(normalizeError(err));
+    }
+}
+
+async function startMsLogin() {
+    if (!state) return;
+    lastAuthError = '';
+    setAccountMessage('正在申请登录码…');
+    try {
+        msDevice = await StartMicrosoftLogin();
+        msPending = true;
+        setAccountMessage('请打开登录页输入代码，完成后会自动返回');
+        renderDevice();
+        await ClipboardSetText(msDevice.userCode).catch(() => undefined);
+    } catch (err) {
+        msPending = false;
+        setAccountMessage(normalizeError(err));
+        renderDevice();
+    }
+}
+
+async function cancelMsLogin() {
+    msPending = false;
+    msDevice = null;
+    renderDevice();
+    setAccountMessage('已取消 Microsoft 登录', 'ok');
+    try {
+        await CancelMicrosoftLogin();
+    } catch (err) {
+        setAccountMessage(normalizeError(err));
+    }
+}
+
+function copyDeviceCode() {
+    if (!msDevice) return;
+    void ClipboardSetText(msDevice.userCode);
+    BrowserOpenURL(msDevice.verificationUri);
+}
+
+async function loginYggdrasilAccount() {
+    if (!state) return;
+    const server = $<HTMLInputElement>('#ygg-server').value.trim();
+    const username = $<HTMLInputElement>('#ygg-user').value.trim();
+    const password = $<HTMLInputElement>('#ygg-pass').value;
+    if (!username || !password) {
+        setAccountMessage('请填写皮肤站账号与密码');
+        return;
+    }
+    const button = $<HTMLButtonElement>('#ygg-login');
+    button.disabled = true;
+    setAccountMessage('正在登录皮肤站…');
+    try {
+        const acc = await LoginYggdrasil(username, password, server);
+        $<HTMLInputElement>('#ygg-pass').value = '';
+        setAccountMessage(`已登录为 ${acc.name}`, 'ok');
+        await refresh();
+        renderAccountList();
+    } catch (err) {
+        setAccountMessage(normalizeError(err));
+    } finally {
+        button.disabled = false;
+    }
+}
+
+function handleAccountListClick(ev: MouseEvent) {
+    const target = ev.target as HTMLElement;
+    const useBtn = target.closest<HTMLButtonElement>('[data-use]');
+    if (useBtn) {
+        const id = useBtn.dataset.use || '';
+        void (async () => {
+            try {
+                await SwitchAccount(id);
+                await refresh();
+                renderAccountList();
+                setAccountMessage('已切换账号', 'ok');
+            } catch (err) {
+                setAccountMessage(normalizeError(err));
+            }
+        })();
+        return;
+    }
+    const removeBtn = target.closest<HTMLButtonElement>('[data-remove]');
+    if (!removeBtn) return;
+    const id = removeBtn.dataset.remove || '';
+    if (confirmRemove !== id) {
+        confirmRemove = id;
+        renderAccountList();
+        if (removeTimer !== undefined) window.clearTimeout(removeTimer);
+        removeTimer = window.setTimeout(() => {
+            confirmRemove = '';
+            removeTimer = undefined;
+            renderAccountList();
+        }, 5000);
+        return;
+    }
+    confirmRemove = '';
+    if (removeTimer !== undefined) {
+        window.clearTimeout(removeTimer);
+        removeTimer = undefined;
+    }
+    void (async () => {
+        try {
+            await RemoveAccount(id);
+            await refresh();
+            renderAccountList();
+            setAccountMessage('账号已删除', 'ok');
+        } catch (err) {
+            setAccountMessage(normalizeError(err));
+        }
+    })();
+}
+
 // ---------- 浮层 ----------
 
 function setSheetMessage(selector: string, text: string, kind: 'error' | 'ok' = 'error') {
@@ -802,9 +1271,9 @@ function setSheetMessage(selector: string, text: string, kind: 'error' | 'ok' = 
     el.classList.toggle('ok', kind === 'ok');
 }
 
-function openSheet(kind: 'mods' | 'logs' | 'history') {
+function openSheet(kind: 'mods' | 'logs' | 'history' | 'account') {
     $('#sheet-mask').hidden = false;
-    for (const id of ['mods-sheet', 'logs-sheet', 'history-sheet']) {
+    for (const id of ['mods-sheet', 'logs-sheet', 'history-sheet', 'account-sheet']) {
         $('#' + id).hidden = id !== `${kind}-sheet`;
     }
     if (kind === 'mods') {
@@ -812,14 +1281,16 @@ function openSheet(kind: 'mods' | 'logs' | 'history') {
         $<HTMLInputElement>('#mods-search').focus();
     } else if (kind === 'logs') {
         void loadLog();
-    } else {
+    } else if (kind === 'history') {
         void loadHistory();
+    } else {
+        initAccountSheet();
     }
 }
 
 function closeSheets() {
     $('#sheet-mask').hidden = true;
-    for (const id of ['mods-sheet', 'logs-sheet', 'history-sheet']) {
+    for (const id of ['mods-sheet', 'logs-sheet', 'history-sheet', 'account-sheet']) {
         $('#' + id).hidden = true;
     }
 }
@@ -1094,6 +1565,49 @@ EventsOn('update:error', (payload: { message?: string }) => {
     showMessage(payload?.message || '更新失败');
     void refresh();
 });
+EventsOn('launcher:update-progress', (payload: { done: number; total: number }) => {
+    if (!payload || !payload.total) return;
+    const percent = Math.min(100, Math.round((payload.done / payload.total) * 100));
+    launcherHint = `正在下载新版本 ${formatBytes(payload.done)} / ${formatBytes(payload.total)}（${percent}%）`;
+    $('#footer-state').textContent = `更新启动器 ${percent}%`;
+    renderLauncherUpdate();
+});
+EventsOn('launcher:update-error', (msg: string) => {
+    installingLauncher = false;
+    launcherHint = msg || '启动器更新失败';
+    showMessage(launcherHint);
+    renderLauncherUpdate();
+});
+EventsOn('launcher:update-done', (payload: { version?: string }) => {
+    launcherHint = `已更新到 v${payload?.version || ''}，正在重启启动器…`;
+    $('#footer-state').textContent = '重启启动器…';
+    renderLauncherUpdate();
+});
+EventsOn('auth:changed', (payload: { name?: string }) => {
+    msPending = false;
+    msDevice = null;
+    lastAuthError = '';
+    setAccountMessage(payload?.name ? `已登录为 ${payload.name}` : '登录成功', 'ok');
+    void refresh().then(() => {
+        renderAccountList();
+        renderDevice();
+    });
+});
+EventsOn('auth:stage', (payload: { message?: string }) => {
+    if (payload?.message) setAccountMessage(payload.message);
+});
+EventsOn('auth:error', (payload: { message?: string }) => {
+    msPending = false;
+    lastAuthError = payload?.message || '登录失败';
+    setAccountMessage(lastAuthError);
+    showMessage(lastAuthError);
+    renderDevice();
+});
+EventsOn('authlib:progress', (payload: { done: number; total: number }) => {
+    if (!payload || !payload.total) return;
+    const percent = Math.min(100, Math.round((payload.done / payload.total) * 100));
+    $('#footer-state').textContent = `下载注入器 ${percent}%`;
+});
 EventsOn('game:exited', (payload: { code: number; durationMs: number; logPath: string }) => {
     if (!payload) return;
     if (payload.code === 0) {
@@ -1118,12 +1632,28 @@ $('#open-settings').addEventListener('click', openDrawer);
 $('#close-settings').addEventListener('click', closeDrawer);
 $('#cancel-settings').addEventListener('click', closeDrawer);
 $('#save-settings').addEventListener('click', saveDrawer);
+$('#check-launcher').addEventListener('click', () => void launcherUpdateClick());
 $('#pick-instance').addEventListener('click', pickInstance);
 $('#drawer-mask').addEventListener('click', closeDrawer);
 
 $('#open-mods').addEventListener('click', () => openSheet('mods'));
 $('#open-logs').addEventListener('click', () => openSheet('logs'));
 $('#open-history').addEventListener('click', () => openSheet('history'));
+$('#open-account').addEventListener('click', () => openSheet('account'));
+$('#account-tabs').addEventListener('click', ev => {
+    const target = (ev.target as HTMLElement).closest<HTMLButtonElement>('button');
+    if (!target || !target.dataset.tab) return;
+    selectAccountTab(target.dataset.tab as typeof accountTab);
+});
+$('#use-offline').addEventListener('click', () => void useOffline());
+$('#start-ms-login').addEventListener('click', () => void startMsLogin());
+$('#cancel-ms-login').addEventListener('click', () => void cancelMsLogin());
+$('#device-copy').addEventListener('click', copyDeviceCode);
+$('#ygg-login').addEventListener('click', () => void loginYggdrasilAccount());
+$('#account-list').addEventListener('click', handleAccountListClick);
+$('#ygg-pass').addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') void loginYggdrasilAccount();
+});
 $('#sheet-mask').addEventListener('click', closeSheets);
 document.querySelectorAll<HTMLButtonElement>('[data-close-sheet]').forEach(btn => {
     btn.addEventListener('click', closeSheets);
@@ -1192,4 +1722,4 @@ $('#memory-row').addEventListener('click', ev => {
     renderMemory();
 });
 
-void refresh();
+void refresh().then(autoBootstrap).then(() => checkLauncherUpdate(true));

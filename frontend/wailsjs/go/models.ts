@@ -1,5 +1,45 @@
 export namespace main {
 	
+	export class AccountView {
+	    id: string;
+	    kind: string;
+	    name: string;
+	    uuid: string;
+	    serverUrl?: string;
+	    expiresAt?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AccountView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.kind = source["kind"];
+	        this.name = source["name"];
+	        this.uuid = source["uuid"];
+	        this.serverUrl = source["serverUrl"];
+	        this.expiresAt = source["expiresAt"];
+	    }
+	}
+	export class DeviceCodeView {
+	    userCode: string;
+	    verificationUri: string;
+	    message: string;
+	    expiresIn: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DeviceCodeView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.userCode = source["userCode"];
+	        this.verificationUri = source["verificationUri"];
+	        this.message = source["message"];
+	        this.expiresIn = source["expiresIn"];
+	    }
+	}
 	export class DiagnosticsView {
 	    path: string;
 	    size: number;
@@ -107,7 +147,8 @@ export namespace main {
 	    javaPath: string;
 	    playerName: string;
 	    memoryMb: number;
-	    updateUrl: string;
+	    downloadWorkers: number;
+	    downloadSegments: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new SettingsInput(source);
@@ -119,7 +160,8 @@ export namespace main {
 	        this.javaPath = source["javaPath"];
 	        this.playerName = source["playerName"];
 	        this.memoryMb = source["memoryMb"];
-	        this.updateUrl = source["updateUrl"];
+	        this.downloadWorkers = source["downloadWorkers"];
+	        this.downloadSegments = source["downloadSegments"];
 	    }
 	}
 	export class SettingsView {
@@ -128,7 +170,9 @@ export namespace main {
 	    playerName: string;
 	    memoryMb: number;
 	    channel: string;
-	    updateUrl: string;
+	    yggdrasilServer: string;
+	    downloadWorkers: number;
+	    downloadSegments: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new SettingsView(source);
@@ -141,7 +185,9 @@ export namespace main {
 	        this.playerName = source["playerName"];
 	        this.memoryMb = source["memoryMb"];
 	        this.channel = source["channel"];
-	        this.updateUrl = source["updateUrl"];
+	        this.yggdrasilServer = source["yggdrasilServer"];
+	        this.downloadWorkers = source["downloadWorkers"];
+	        this.downloadSegments = source["downloadSegments"];
 	    }
 	}
 	export class StateView {
@@ -150,6 +196,12 @@ export namespace main {
 	    javaScanning: boolean;
 	    javaError?: string;
 	    instance: InstanceView;
+	    accounts: AccountView[];
+	    accountId: string;
+	    microsoftLoggingIn: boolean;
+	    proxy: string;
+	    launcherVersion: string;
+	    launcherUpdating: boolean;
 	    running: boolean;
 	    updating: boolean;
 	    rollingBack: boolean;
@@ -165,6 +217,12 @@ export namespace main {
 	        this.javaScanning = source["javaScanning"];
 	        this.javaError = source["javaError"];
 	        this.instance = this.convertValues(source["instance"], InstanceView);
+	        this.accounts = this.convertValues(source["accounts"], AccountView);
+	        this.accountId = source["accountId"];
+	        this.microsoftLoggingIn = source["microsoftLoggingIn"];
+	        this.proxy = source["proxy"];
+	        this.launcherVersion = source["launcherVersion"];
+	        this.launcherUpdating = source["launcherUpdating"];
 	        this.running = source["running"];
 	        this.updating = source["updating"];
 	        this.rollingBack = source["rollingBack"];
@@ -187,6 +245,31 @@ export namespace main {
 		    }
 		    return a;
 		}
+	}
+
+}
+
+export namespace selfupdate {
+	
+	export class Info {
+	    available: boolean;
+	    currentVersion: string;
+	    latestVersion: string;
+	    notes?: string;
+	    size: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Info(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.available = source["available"];
+	        this.currentVersion = source["currentVersion"];
+	        this.latestVersion = source["latestVersion"];
+	        this.notes = source["notes"];
+	        this.size = source["size"];
+	    }
 	}
 
 }

@@ -332,6 +332,61 @@ func TestCompareVersions(t *testing.T) {
 	}
 }
 
+func TestUpdateFromEmptyRoot(t *testing.T) {
+	root := t.TempDir()
+	source := t.TempDir()
+	serverRoot := t.TempDir()
+
+	write(t, source, "mods/core.jar", []byte("core mod"))
+	write(t, source, "config/pack.cfg", []byte("pack config"))
+	write(t, source, "versions/Create-Delight-Remake/Create-Delight-Remake.json", []byte(`{"id":"Create-Delight-Remake"}`))
+
+	files, err := manifest.Build(manifest.BuildOptions{Root: source, BlobsDir: filepath.Join(serverRoot, "blobs")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.FileServer(http.Dir(serverRoot)))
+	defer server.Close()
+	m := &manifest.Manifest{
+		Format:      manifest.FormatVersion,
+		PackID:      manifest.DefaultPackID,
+		Channel:     "stable",
+		Version:     "5.2.3",
+		PublishedAt: "2026-10-24T00:00:00Z",
+		BaseURL:     server.URL + "/",
+		Files:       files,
+	}
+	if err := m.Write(filepath.Join(serverRoot, "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Update(context.Background(), Options{
+		Root:        root,
+		ManifestURL: server.URL,
+		PackID:      manifest.DefaultPackID,
+		Channel:     "stable",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Updated || res.Version != "5.2.3" || res.Files != 3 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if got := read(t, root, "mods/core.jar"); string(got) != "core mod" {
+		t.Fatalf("mods/core.jar = %q", got)
+	}
+	if got := read(t, root, "config/pack.cfg"); string(got) != "pack config" {
+		t.Fatalf("config/pack.cfg = %q", got)
+	}
+	idx, err := LoadIndex(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.Version != "5.2.3" {
+		t.Fatalf("installed version = %s", idx.Version)
+	}
+}
+
 func TestRollbackRestoresSnapshotAndCanRollForward(t *testing.T) {
 	root := t.TempDir()
 	nextRoot := t.TempDir()

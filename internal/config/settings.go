@@ -12,32 +12,54 @@ import (
 )
 
 const (
-	DefaultChannel  = "stable"
-	DefaultMemoryMB = 8192
-	MinMemoryMB     = 1024
-	MaxMemoryMB     = 32768
+	DefaultChannel         = "stable"
+	DefaultMemoryMB        = 8192
+	MinMemoryMB            = 1024
+	MaxMemoryMB            = 32768
+	DefaultYggdrasilServer = "https://littleskin.cn/api/yggdrasil"
+	// 下载并发：同时下载的文件数，以及单个大文件的分片连接数。
+	DefaultDownloadWorkers  = 512
+	DefaultDownloadSegments = 32
+	MinDownloadWorkers      = 1
+	MaxDownloadWorkers      = 1024
+	MinDownloadSegments     = 1
+	MaxDownloadSegments     = 64
+	// DefaultUpdateURL 是内置更新源，启动器始终使用该地址，不接受覆盖。
+	DefaultUpdateURL = "https://mc-api.xn--suki-uf1gk54ba.cn/pack/"
+	// DefaultMicrosoftClientID 是内置的 Azure 应用 ID，不在界面与配置文件中暴露。
+	DefaultMicrosoftClientID = "e54807b1-f3e1-4710-a099-b9cbacf4579a"
 )
 
 var playerNameRe = regexp.MustCompile(`^[A-Za-z0-9_]{3,16}$`)
 
 // Settings 是持久化到 %APPDATA%\CDRLauncher\settings.json 的启动器设置。
 type Settings struct {
-	InstanceDir string `json:"instanceDir"`
-	JavaPath    string `json:"javaPath"`
-	PlayerName  string `json:"playerName"`
-	MemoryMB    int    `json:"memoryMb"`
-	Channel     string `json:"channel"`
-	PackVersion string `json:"packVersion"`
-	UpdateURL   string `json:"updateUrl"`
+	InstanceDir       string `json:"instanceDir"`
+	JavaPath          string `json:"javaPath"`
+	PlayerName        string `json:"playerName"`
+	MemoryMB          int    `json:"memoryMb"`
+	Channel           string `json:"channel"`
+	PackVersion       string `json:"packVersion"`
+	UpdateURL         string `json:"-"`
+	AccountID         string `json:"accountId"`
+	MicrosoftClientID string `json:"-"`
+	YggdrasilServer   string `json:"yggdrasilServer"`
+	DownloadWorkers   int    `json:"downloadWorkers"`
+	DownloadSegments  int    `json:"downloadSegments"`
 }
 
 // Defaults 返回以 exeDir 为基准的默认设置。
 func Defaults(exeDir string) Settings {
 	return Settings{
-		InstanceDir: DefaultInstanceDir(exeDir),
-		PlayerName:  "Player",
-		MemoryMB:    DefaultMemoryMB,
-		Channel:     DefaultChannel,
+		InstanceDir:       DefaultInstanceDir(exeDir),
+		PlayerName:        "Player",
+		MemoryMB:          DefaultMemoryMB,
+		Channel:           DefaultChannel,
+		UpdateURL:         DefaultUpdateURL,
+		MicrosoftClientID: DefaultMicrosoftClientID,
+		YggdrasilServer:   DefaultYggdrasilServer,
+		DownloadWorkers:   DefaultDownloadWorkers,
+		DownloadSegments:  DefaultDownloadSegments,
 	}
 }
 
@@ -109,7 +131,22 @@ func (s *Settings) Normalize(exeDir string) {
 	if s.Channel == "" {
 		s.Channel = DefaultChannel
 	}
-	s.UpdateURL = strings.TrimSpace(s.UpdateURL)
+	// 更新地址内置锁定，忽略配置文件中的值。
+	s.UpdateURL = DefaultUpdateURL
+	// 下载并发内置上下限，越界时回到默认值。
+	if s.DownloadWorkers < MinDownloadWorkers || s.DownloadWorkers > MaxDownloadWorkers {
+		s.DownloadWorkers = DefaultDownloadWorkers
+	}
+	if s.DownloadSegments < MinDownloadSegments || s.DownloadSegments > MaxDownloadSegments {
+		s.DownloadSegments = DefaultDownloadSegments
+	}
+	s.AccountID = strings.TrimSpace(s.AccountID)
+	// Azure 应用 ID 内置，避免在界面或配置文件中暴露。
+	s.MicrosoftClientID = DefaultMicrosoftClientID
+	s.YggdrasilServer = strings.TrimSpace(s.YggdrasilServer)
+	if s.YggdrasilServer == "" {
+		s.YggdrasilServer = DefaultYggdrasilServer
+	}
 }
 
 // Validate 校验用户可修改字段，供保存与启动前调用。
