@@ -28,6 +28,8 @@ const (
 	DefaultUpdateURL = "https://mc-api.xn--suki-uf1gk54ba.cn/pack/"
 	// DefaultMicrosoftClientID 是内置的 Azure 应用 ID，不在界面与配置文件中暴露。
 	DefaultMicrosoftClientID = "e54807b1-f3e1-4710-a099-b9cbacf4579a"
+	// DefaultJavaProvider 是内置 Java 的默认下载来源。
+	DefaultJavaProvider = "auto"
 )
 
 var playerNameRe = regexp.MustCompile(`^[A-Za-z0-9_]{3,16}$`)
@@ -46,6 +48,7 @@ type Settings struct {
 	YggdrasilServer   string `json:"yggdrasilServer"`
 	DownloadWorkers   int    `json:"downloadWorkers"`
 	DownloadSegments  int    `json:"downloadSegments"`
+	JavaProvider      string `json:"javaProvider"`
 }
 
 // Defaults 返回以 exeDir 为基准的默认设置。
@@ -60,6 +63,7 @@ func Defaults(exeDir string) Settings {
 		YggdrasilServer:   DefaultYggdrasilServer,
 		DownloadWorkers:   DefaultDownloadWorkers,
 		DownloadSegments:  DefaultDownloadSegments,
+		JavaProvider:      DefaultJavaProvider,
 	}
 }
 
@@ -141,6 +145,12 @@ func (s *Settings) Normalize(exeDir string) {
 		s.DownloadSegments = DefaultDownloadSegments
 	}
 	s.AccountID = strings.TrimSpace(s.AccountID)
+	s.JavaProvider = strings.ToLower(strings.TrimSpace(s.JavaProvider))
+	switch s.JavaProvider {
+	case "zulu", "graalvm", "microsoft", "auto":
+	default:
+		s.JavaProvider = DefaultJavaProvider
+	}
 	// Azure 应用 ID 内置，避免在界面或配置文件中暴露。
 	s.MicrosoftClientID = DefaultMicrosoftClientID
 	s.YggdrasilServer = strings.TrimSpace(s.YggdrasilServer)

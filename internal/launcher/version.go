@@ -105,10 +105,17 @@ func GameDir(instanceDir, id string) string {
 	return instanceDir
 }
 
-// LoadVersion 读取 versions/<id>/<id>.json。
+// LoadVersion 读取 versions/<id>/<id>.json，并按 inheritsFrom 链合并父版本。
 func LoadVersion(instanceDir, id string) (*Version, error) {
+	return loadVersion(instanceDir, id, 0)
+}
+
+func loadVersion(instanceDir, id string, depth int) (*Version, error) {
 	if id == "" {
 		return nil, errors.New("版本 ID 为空")
+	}
+	if depth > 4 {
+		return nil, fmt.Errorf("版本继承层级过深: %s", id)
 	}
 	path := filepath.Join(instanceDir, "versions", id, id+".json")
 	raw, err := os.ReadFile(path)
@@ -123,7 +130,11 @@ func LoadVersion(instanceDir, id string) (*Version, error) {
 		v.ID = id
 	}
 	if v.InheritsFrom != "" {
-		return nil, fmt.Errorf("暂不支持继承版本: %s", v.InheritsFrom)
+		parent, err := loadVersion(instanceDir, v.InheritsFrom, depth+1)
+		if err != nil {
+			return nil, fmt.Errorf("加载父版本 %s 失败: %w", v.InheritsFrom, err)
+		}
+		mergeParent(&v, parent)
 	}
 	if v.MainClass == "" {
 		return nil, errors.New("版本 json 缺少 mainClass")
@@ -135,6 +146,42 @@ func LoadVersion(instanceDir, id string) (*Version, error) {
 		v.Type = "release"
 	}
 	return &v, nil
+}
+
+// mergeParent 把父版本并入子版本：子版本库在前，父版本参数在前（与 Forge 官方合并顺序一致）。
+func mergeParent(child, parent *Version) {
+	libs := make([]Library, 0, len(child.Libraries)+len(parent.Libraries))
+	seen := make(map[string]bool, len(child.Libraries))
+	for _, lib := range child.Libraries {
+		seen[lib.Name] = true
+		libs = append(libs, lib)
+	}
+	for _, lib := range parent.Libraries {
+		if seen[lib.Name] {
+			continue
+		}
+		libs = append(libs, lib)
+	}
+	child.Libraries = libs
+
+	child.Arguments.JVM = append(append([]Argument(nil), parent.Arguments.JVM...), child.Arguments.JVM...)
+	child.Arguments.Game = append(append([]Argument(nil), parent.Arguments.Game...), child.Arguments.Game...)
+
+	if child.MainClass == "" {
+		child.MainClass = parent.MainClass
+	}
+	if child.Assets == "" {
+		child.Assets = parent.Assets
+	}
+	if child.AssetIndex.ID == "" {
+		child.AssetIndex = parent.AssetIndex
+	}
+	if child.JavaVersion.MajorVersion == 0 {
+		child.JavaVersion = parent.JavaVersion
+	}
+	if child.Type == "" {
+		child.Type = parent.Type
+	}
 }
 
 // ClientJar 返回版本主 jar 路径。

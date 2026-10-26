@@ -108,6 +108,7 @@ func (a *App) startup(ctx context.Context) {
 type SettingsView struct {
 	InstanceDir      string `json:"instanceDir"`
 	JavaPath         string `json:"javaPath"`
+	JavaProvider     string `json:"javaProvider"`
 	PlayerName       string `json:"playerName"`
 	MemoryMB         int    `json:"memoryMb"`
 	Channel          string `json:"channel"`
@@ -173,6 +174,7 @@ type StateView struct {
 type SettingsInput struct {
 	InstanceDir      string `json:"instanceDir"`
 	JavaPath         string `json:"javaPath"`
+	JavaProvider     string `json:"javaProvider"`
 	PlayerName       string `json:"playerName"`
 	MemoryMB         int    `json:"memoryMb"`
 	DownloadWorkers  int    `json:"downloadWorkers"`
@@ -215,6 +217,7 @@ func (a *App) GetState() StateView {
 		Settings: SettingsView{
 			InstanceDir:      cfg.InstanceDir,
 			JavaPath:         cfg.JavaPath,
+			JavaProvider:     cfg.JavaProvider,
 			PlayerName:       cfg.PlayerName,
 			MemoryMB:         cfg.MemoryMB,
 			Channel:          cfg.Channel,
@@ -320,6 +323,7 @@ func (a *App) SaveSettings(in SettingsInput) error {
 
 	s.InstanceDir = in.InstanceDir
 	s.JavaPath = strings.TrimSpace(in.JavaPath)
+	s.JavaProvider = in.JavaProvider
 	s.PlayerName = in.PlayerName
 	s.MemoryMB = in.MemoryMB
 	s.DownloadWorkers = in.DownloadWorkers
@@ -375,12 +379,12 @@ func (a *App) refreshJava() error {
 	return err
 }
 
-// DownloadJava 下载并安装内置 Temurin 17，供设置页手动触发。
+// DownloadJava 按设置的来源下载并安装内置 Java 21，供设置页手动触发。
 func (a *App) DownloadJava() error {
 	a.mu.Lock()
 	cfg := a.cfg
 	a.mu.Unlock()
-	_, err := launcher.EnsureJava(a.ctx, cfg.InstanceDir, cfg.DownloadSegments, a.javaProgress)
+	_, err := launcher.EnsureJavaProvider(a.ctx, cfg.InstanceDir, cfg.JavaProvider, cfg.DownloadSegments, a.javaProgress)
 	if err != nil {
 		return err
 	}
@@ -389,6 +393,41 @@ func (a *App) DownloadJava() error {
 
 func (a *App) javaProgress(done, total int64) {
 	a.emit("launcher:java-progress", map[string]int64{"done": done, "total": total})
+}
+
+func (a *App) gameProgress(p launcher.InstallProgress) {
+	a.emit("game:progress", p)
+}
+
+// ensurePack 首次启动时完整下载整合包；已安装过的实例交给更新面板做增量更新。
+func (a *App) ensurePack(cfg config.Settings) error {
+	gameDir := launcher.GameDir(cfg.InstanceDir, packVersionID)
+	if idx, err := updater.LoadIndex(gameDir); err == nil && idx.Version != "" {
+		return nil
+	}
+	if cfg.UpdateURL == "" {
+		return errors.New("内置更新源不可用")
+	}
+	_, err := updater.Update(a.ctx, updater.Options{
+		Root:           gameDir,
+		ManifestURL:    cfg.UpdateURL,
+		CurrentVersion: cfg.PackVersion,
+		PackID:         "create-delight-remake",
+		Channel:        cfg.Channel,
+		Workers:        cfg.DownloadWorkers,
+		Segments:       cfg.DownloadSegments,
+		Progress: func(p updater.Progress) {
+			a.gameProgress(launcher.InstallProgress{
+				Phase:      "下载整合包",
+				Message:    p.Message,
+				Done:       p.Done,
+				Total:      p.Total,
+				FilesDone:  p.FilesDone,
+				FilesTotal: p.FilesTotal,
+			})
+		},
+	})
+	return err
 }
 
 // ---------- 账号 ----------
@@ -761,6 +800,21 @@ func (a *App) StartGame() error {
 	if err != nil {
 		return err
 	}
+	if err := launcher.EnsureGame(a.ctx, launcher.InstallOptions{
+		InstanceDir:  cfg.InstanceDir,
+		PackID:       packVersionID,
+		MCVersion:    launcher.DefaultMCVersion,
+		ForgeVersion: launcher.DefaultForgeVer,
+		JavaPath:     javaPath,
+		Workers:      cfg.DownloadWorkers,
+		Segments:     cfg.DownloadSegments,
+		Progress:     a.gameProgress,
+	}); err != nil {
+		return fmt.Errorf("准备游戏文件失败: %w", err)
+	}
+	if err := a.ensurePack(cfg); err != nil {
+		a.emit("launcher:warning", "整合包文件下载失败: "+err.Error())
+	}
 	v, err := launcher.LoadVersion(cfg.InstanceDir, packVersionID)
 	if err != nil {
 		return err
@@ -822,7 +876,7 @@ func (a *App) pickJava(cfg config.Settings) (string, error) {
 		}
 	}
 
-	path, err := launcher.EnsureJava(a.ctx, cfg.InstanceDir, cfg.DownloadSegments, a.javaProgress)
+	path, err := launcher.EnsureJavaProvider(a.ctx, cfg.InstanceDir, cfg.JavaProvider, cfg.DownloadSegments, a.javaProgress)
 	if err != nil {
 		return "", err
 	}

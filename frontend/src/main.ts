@@ -32,6 +32,7 @@ import {BrowserOpenURL, ClipboardSetText, EventsOn} from '../wailsjs/runtime/run
 interface SettingsView {
     instanceDir: string;
     javaPath: string;
+    javaProvider: string;
     playerName: string;
     memoryMb: number;
     channel: string;
@@ -153,6 +154,15 @@ interface UpdateProgress {
     message?: string;
 }
 
+interface GameProgress {
+    phase: string;
+    message?: string;
+    done: number;
+    total: number;
+    filesDone: number;
+    filesTotal: number;
+}
+
 interface UpdateResult {
     version: string;
     updated: boolean;
@@ -217,7 +227,7 @@ document.querySelector('#app')!.innerHTML = `
           <div class="progress-bar" id="java-bar"></div>
           <span class="progress-text" id="java-progress-text">0%</span>
         </div>
-        <button id="download-java" class="ghost-btn" type="button" hidden>下载内置 Java 21（约 47 MB）</button>
+        <button id="download-java" class="ghost-btn" type="button" hidden>下载内置 Java 21</button>
       </div>
 
       <div class="field">
@@ -231,6 +241,11 @@ document.querySelector('#app')!.innerHTML = `
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.14v13.72a1 1 0 0 0 1.5.87l11-6.86a1 1 0 0 0 0-1.72l-11-6.86A1 1 0 0 0 8 5.14z"/></svg>
         <span>开始游戏</span>
       </button>
+      <div id="game-progress" class="progress" hidden>
+        <div class="progress-bar" id="game-bar"></div>
+        <span class="progress-text" id="game-progress-text">0%</span>
+      </div>
+      <p id="game-status" class="hint" hidden></p>
       <button id="kill-game" class="ghost-btn wide danger" type="button" hidden>强制结束游戏</button>
       <p id="message" class="message" hidden></p>
     </section>
@@ -293,6 +308,16 @@ document.querySelector('#app')!.innerHTML = `
       <label for="java-select">Java 运行时</label>
       <select id="java-select" class="text-input"></select>
       <small class="hint">自动模式优先使用 Java 21，缺失时下载内置版本</small>
+    </div>
+    <div class="field">
+      <label for="java-provider">Java 下载来源</label>
+      <select id="java-provider" class="text-input">
+        <option value="auto">自动（优先已安装，缺失时 Zulu 21）</option>
+        <option value="zulu">Zulu 21（Azul）</option>
+        <option value="graalvm">GraalVM 21（Oracle）</option>
+        <option value="microsoft">Microsoft OpenJDK 21</option>
+      </select>
+      <small class="hint">仅在内置 Java 缺失时下载，需要 JDK 21</small>
     </div>
     <div class="field">
       <label>下载并发</label>
@@ -465,6 +490,7 @@ let selectedMemory = 4096;
 let syncedMemory = -1;
 let selectedWorkers = 512;
 let selectedSegments = 32;
+let selectedJavaProvider = 'auto';
 let syncedWorkers = -1;
 let syncedSegments = -1;
 let busy = false;
@@ -596,6 +622,18 @@ function renderJava() {
 
     downloadBtn.hidden = !!compatible || busy;
     downloadBtn.disabled = busy;
+    downloadBtn.textContent = `下载内置 Java 21（${javaProviderLabel(state.settings.javaProvider)}）`;
+}
+
+const JAVA_PROVIDER_LABELS: Record<string, string> = {
+    zulu: 'Zulu',
+    graalvm: 'GraalVM',
+    microsoft: 'Microsoft OpenJDK'
+};
+
+function javaProviderLabel(provider: string): string {
+    if (!provider || provider === 'auto') return 'Zulu';
+    return JAVA_PROVIDER_LABELS[provider] || 'Zulu';
 }
 
 function renderMemory() {
@@ -785,6 +823,7 @@ function render() {
         syncedSegments = state.settings.downloadSegments;
         selectedSegments = state.settings.downloadSegments;
     }
+    selectedJavaProvider = state.settings.javaProvider || 'auto';
     renderHero();
     renderJava();
     renderAccount();
@@ -862,6 +901,7 @@ function collectSettings(instanceDir: string, javaPath: string, playerName?: str
         javaPath,
         playerName: playerName ?? playerInput.value.trim(),
         memoryMb: selectedMemory,
+        javaProvider: selectedJavaProvider,
         downloadWorkers: selectedWorkers,
         downloadSegments: selectedSegments,
     };
@@ -885,6 +925,8 @@ async function launch() {
     } finally {
         busy = false;
         $('#java-progress').hidden = true;
+        $('#game-progress').hidden = true;
+        $('#game-status').hidden = true;
         await refresh();
     }
 }
@@ -1013,6 +1055,7 @@ function openDrawer() {
         select.appendChild(custom);
     }
     select.value = current.settings.javaPath;
+    $<HTMLSelectElement>('#java-provider').value = current.settings.javaProvider || 'auto';
     $<HTMLInputElement>('#download-workers').value = String(current.settings.downloadWorkers);
     $<HTMLInputElement>('#download-segments').value = String(current.settings.downloadSegments);
     $('#channel-value').textContent = current.settings.channel;
@@ -1041,6 +1084,7 @@ async function saveDrawer() {
     }
     workersInput.value = String(selectedWorkers);
     segmentsInput.value = String(selectedSegments);
+    selectedJavaProvider = $<HTMLSelectElement>('#java-provider').value || 'auto';
     try {
         await SaveSettings(collectSettings(
             $<HTMLInputElement>('#instance-dir').value.trim(),
@@ -1521,6 +1565,19 @@ EventsOn('launcher:java-progress', (payload: { done: number; total: number }) =>
     $('#java-bar').style.width = `${percent}%`;
     $('#java-progress-text').textContent = `${percent}%`;
     $('#footer-state').textContent = `下载 Java ${percent}%`;
+});
+EventsOn('game:progress', (p: GameProgress) => {
+    if (!p) return;
+    const percent = p.total > 0
+        ? Math.min(100, Math.round((p.done / p.total) * 100))
+        : (p.filesTotal > 0 ? Math.min(100, Math.round((p.filesDone / p.filesTotal) * 100)) : 0);
+    $('#game-progress').hidden = false;
+    $('#game-bar').style.width = `${percent}%`;
+    $('#game-progress-text').textContent = `${percent}%`;
+    const status = $('#game-status');
+    status.hidden = false;
+    status.textContent = `${p.phase}${p.message ? ' · ' + p.message : ''}`;
+    $('#footer-state').textContent = `${p.phase} ${percent}%`;
 });
 EventsOn('update:progress', (payload: UpdateProgress) => {
     if (!payload) return;

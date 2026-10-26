@@ -145,6 +145,7 @@ export namespace main {
 	export class SettingsInput {
 	    instanceDir: string;
 	    javaPath: string;
+	    javaProvider: string;
 	    playerName: string;
 	    memoryMb: number;
 	    downloadWorkers: number;
@@ -158,6 +159,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.instanceDir = source["instanceDir"];
 	        this.javaPath = source["javaPath"];
+	        this.javaProvider = source["javaProvider"];
 	        this.playerName = source["playerName"];
 	        this.memoryMb = source["memoryMb"];
 	        this.downloadWorkers = source["downloadWorkers"];
@@ -167,6 +169,7 @@ export namespace main {
 	export class SettingsView {
 	    instanceDir: string;
 	    javaPath: string;
+	    javaProvider: string;
 	    playerName: string;
 	    memoryMb: number;
 	    channel: string;
@@ -182,6 +185,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.instanceDir = source["instanceDir"];
 	        this.javaPath = source["javaPath"];
+	        this.javaProvider = source["javaProvider"];
 	        this.playerName = source["playerName"];
 	        this.memoryMb = source["memoryMb"];
 	        this.channel = source["channel"];

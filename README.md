@@ -5,12 +5,13 @@ Windows 整合包启动器。Go 负责启动、更新与文件操作，Wails v2 
 ## 功能
 
 - **实例识别**：读取 `versions/Create-Delight-Remake` 的 MC / Forge 版本、模组数量与整合包版本，配置失效时给出提示
-- **Java 管理**：扫描本机 Java 21（PATH、常见安装目录、注册表），缺失时可一键下载；启动前校验主版本
+- **Java 管理**：扫描本机 Java 21（PATH、常见安装目录、注册表），缺失时按设置从 Zulu / GraalVM / Microsoft OpenJDK 下载内置 JDK；启动前校验主版本
+- **官方文件安装**：实例缺少原版文件时，从 Mojang 官方 CDN 下载版本 json、客户端 jar、`libraries` 与 `assets`，再调用 Forge 官方安装器生成 `1.20.1-forge-47.4.23`，最后生成启动器使用的包装版本；全程不随启动器分发游戏本体
 - **启动游戏**：内存大小、natives 解包、工作目录与日志重定向；支持强制结束进程
 - **账号体系**：Microsoft 正版登录（设备码）、离线登录、皮肤站 yggdrasil 登录；令牌用 Windows DPAPI 加密保存
-- **便携实例**：默认在启动器所在目录创建 `.minecraft` 存放整合包，首次启动会自动检查并下载完整包
+- **便携实例**：默认在启动器所在目录创建 `.minecraft`，单个 exe 即可从零补齐 Java、原版、Forge 与整合包文件
 - **增量更新**：内置并锁定更新源 `https://mc-api.xn--suki-uf1gk54ba.cn/pack/`，按 `<updateUrl>/manifest.json` 做内容寻址的增量下载，推送进度事件、可取消；启动时自动恢复上次中断的更新
-- **多线程下载**：默认 512 个文件并发、支持 HTTP/2 复用连接；单个大文件（≥8 MB）默认 32 连接做 Range 分片，服务端不支持时回退单连接续传；并发数与分片数可在设置中手动填写
+- **多线程下载**：整合包默认 512 个文件并发、支持 HTTP/2 复用连接；单个大文件（≥8 MB）默认 32 连接做 Range 分片，服务端不支持时回退单连接续传；并发数与分片数可在设置中手动填写。官方 CDN 与资源文件并发上限固定为 64，避免被限流
 - **启动器自更新**：检查内置清单 `pack/launcher/latest.json`，下载后校验大小与 sha256，替换自身并自动重启；所有更新地址写死在代码中，不在界面展示
 - **备份与回滚**：更新前保留历史版本，可按时间戳回滚到任意备份
 - **模组面板**：列出 mods 目录并启停（写入 overlay 记录，更新后仍生效）
@@ -27,6 +28,18 @@ Windows 整合包启动器。Go 负责启动、更新与文件操作，Wails v2 
 - **皮肤站登录**：填 yggdrasil API 根地址（如 `https://littleskin.cn/api/yggdrasil`）和账号密码。启动时自动下载 `authlib-injector.jar` 并注入 `-javaagent`，皮肤与在线验证走该皮肤站。
 
 令牌保存在 `%APPDATA%\CDRLauncher\accounts.dat`，使用 Windows DPAPI 按当前用户加密，换用户或换机器无法直接复制；皮肤站密码只用于换取令牌，不会落盘。
+
+## 首次启动会做什么
+
+只需分发一个 `cdr-launcher.exe`（或连同 `README` 一起打包），实例目录保持为空即可：
+
+1. **Java**：优先使用本机已装的 Java 21；缺失时按「Java 下载来源」从 Zulu / GraalVM / Microsoft OpenJDK 下载 zip，解压到 `<实例>/runtime/<来源>-21`
+2. **原版文件**：从 `piston-meta.mojang.com` 取版本清单与 `1.20.1` 版本 json，下载客户端 jar、`libraries` 中当前平台所需的依赖（含规则过滤），再按 `assetIndex` 从 `resources.download.minecraft.net` 下载资源对象到 `assets/objects`
+3. **Forge**：从 `maven.minecraftforge.net` 下载官方安装器，以 `--installClient` 在实例目录静默安装，生成 `versions/1.20.1-forge-47.4.23`
+4. **包装版本**：写入 `versions/Create-Delight-Remake/Create-Delight-Remake.json`（`inheritsFrom` 指向 Forge 版本），并把原版 jar 复制为该版本的主 jar
+5. **整合包文件**：按内置更新源下载 `mods`、`config`、`resourcepacks` 等内容，之后每次启动都会检查更新
+
+启动面板会实时显示阶段、已完成文件数与字节进度。已存在的文件按大小判断，重复启动只补齐缺失部分；Forge 安装器日志写入 `<实例>/logs/forge-install.log`。
 
 > 合规提示：离线登录与皮肤站外置登录仅适用于离线模式或采用外置登录认证的服务器，**不等于拥有 Minecraft 授权**；玩家需自行持有正版。本项目为非官方工具，与 Mojang / Microsoft 无关联。
 
@@ -113,7 +126,7 @@ main.go            窗口与资源嵌入
 open.go            打开目录 / 选择目录等系统交互
 internal/config    设置读写、默认值与校验
 internal/auth      微软设备码登录、皮肤站 yggdrasil、DPAPI 账号存储、authlib-injector 下载
-internal/launcher  Java 扫描与下载、启动参数、natives、进程管理
+internal/launcher  Java 扫描与三种来源的 JDK 下载、Mojang 官方文件安装、Forge 官方安装器、启动参数、natives、进程管理
 internal/netproxy  读取 Windows 系统代理（注册表 + 环境变量 + 例外列表）
 internal/fetch     多连接 Range 分片下载
 internal/manifest  manifest 类型、内容寻址 blob、差分补丁
@@ -130,7 +143,8 @@ frontend/          Vite + TypeScript 界面与 Wails 生成的绑定
 > Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.
 
 - 本项目是非官方第三方启动器，与 Mojang、Microsoft 无隶属关系；界面中的「Minecraft」仅为描述性使用。
-- 仓库与启动器本身不包含、也不分发 Minecraft 游戏本体、资源文件或库；玩家需自行持有正版 Minecraft 授权。自行制作分发包时请勿包含 `versions/*/` 下的客户端 jar、`libraries/`、`assets/`，应让玩家用官方启动器安装，或由启动器从 Mojang 官方 CDN 下载。
+- 仓库与启动器本身不包含、也不分发 Minecraft 游戏本体、资源文件或库：客户端 jar、`libraries/`、`assets/` 均在玩家机器上从 Mojang 官方 CDN（`piston-meta.mojang.com`、`resources.download.minecraft.net`）下载，Forge 由官方安装器（`maven.minecraftforge.net`）安装。玩家需自行持有正版 Minecraft 授权。
+- **分发包只用 exe**：不要把 `.minecraft`（尤其 `versions/*/`、`libraries/`、`assets/`）或 HMCL/PCL 等其他启动器打进去；若确实要打包实例，只能包含整合包作者自有的 `mods`、`config`、`resourcepacks` 等，并且必须确认这些内容的许可证允许再分发。
 - 离线登录与皮肤站外置登录仅用于 `online-mode=false` 或采用外置登录认证的服务器，不代表拥有游戏授权，请勿用于规避正版验证。
 - 整合包内的模组、光影、资源包版权归各自作者所有；再分发前需确认其许可证允许，禁止转载的项目应从分发包与更新源中移除。
 - `authlib-injector` 采用 AGPL-3.0 及 AUTHLIB-INJECTOR 例外条款；本启动器仅在运行时从官方发布页下载并校验 sha256，未转存其二进制。
@@ -141,6 +155,7 @@ frontend/          Vite + TypeScript 界面与 Wails 生成的绑定
 - 仅支持 Windows（依赖 WebView2 与 Windows 进程控制）。
 - 代理优先读环境变量，其次读 `HKCU\...\Internet Settings` 的 `ProxyEnable` / `ProxyServer` / `ProxyOverride`；仅启用 PAC（自动配置脚本）时启动器按直连处理并在设置中提示，建议在代理软件里开启全局/TUN 模式。
 - 游戏进程会追加 `-Djava.net.useSystemProxies=true` 与显式 `http/https/socksProxyHost` 参数，游戏内的登录、皮肤等 HTTP(S) 请求同样走代理；多人游戏服务器的直连 TCP 不经过 JVM 代理，需要代理软件开启 TUN/全局模式。
-- 下载并发默认 512（可填 1–1024），大文件分片默认 32（可填 1–64）；分片依赖服务端 `Range` 支持，R2/Worker 已开启，遇到不支持的服务端会自动回退单连接。
+- 下载并发默认 512（可填 1–1024），大文件分片默认 32（可填 1–64）；分片依赖服务端 `Range` 支持，R2/Worker 已开启，遇到不支持的服务端会自动回退单连接。官方 CDN 的文件并发固定为 64。
+- 首次启动按「Java → 原版 → Forge → 整合包」顺序自动补齐，耗时取决于网络。内置 JDK zip 约 180–220 MB，原版 jar 与 `assets` 约数百 MB，均只下载一次；之后启动只做缺失检查与整合包增量更新。
 - `dist/`、`build/bin/`、`frontend/dist/` 属于本地构建与发布产物，不纳入版本控制。
 - 单测覆盖参数组装、Java 版本判定、manifest/差分、更新安装与回滚、模组、日志、账号与皮肤站地址逻辑；启动游戏、微软登录、皮肤站登录与更新安装等端到端流程尚未在真机完整验证。
